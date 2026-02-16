@@ -20,37 +20,50 @@ app.post("/generate", async (req, res) => {
       return res.status(400).json({ error: "Missing prompt or lcfContext" });
     }
 
+    // ===== Strict Prompt =====
     const formattedPrompt = `
 You are an AI assistant for a workforce kiosk transfer system.
 
-User said: "${prompt}"
+User speech:
+"${prompt}"
 
-Available dropdown categories and options:
+Matched categories and allowed options:
 ${JSON.stringify(lcfContext, null, 2)}
 
-Instructions:
-- Only choose values from the provided options.
-- Return ONLY valid JSON with category-value pairs.
-- If unsure, return null for that category.
-- Example output:
-{
-  "Department": "ADMINISTRATION",
-  "Shift": "MORNING SHIFT",
-  "Job": null
-}
+STRICT RULES:
+1. You MUST only choose values from the provided options.
+2. If the spoken text does NOT clearly contain one of the options, return null.
+3. Do NOT guess.
+4. Do NOT infer.
+5. Do NOT create new values.
+6. If nothing matches, return an empty JSON {}.
+7. Return ONLY valid JSON.
+8. No explanation text.
 `;
 
     const response = await axios.post(
       GROQ_URL,
       {
-        // model: "llama3-70b-8192", // Llama 3 model
         model: "llama-3.1-8b-instant",
-
-        messages: [
-          { role: "system", content: "You are a helpful assistant that returns only valid JSON." },
-          { role: "user", content: formattedPrompt }
-        ],
         temperature: 0,
+        response_format: { type: "json_object" }, // Force JSON
+        messages: [
+          {
+            role: "system",
+            content: `
+You are a strict JSON generator.
+You never explain.
+You never add extra text.
+You never guess values.
+You only select from provided options.
+If no exact match exists, return null.
+`
+          },
+          {
+            role: "user",
+            content: formattedPrompt
+          }
+        ]
       },
       {
         headers: {
@@ -64,6 +77,7 @@ Instructions:
     console.log("RAW LLM OUTPUT:", rawOutput);
 
     let parsedResult;
+
     try {
       parsedResult = JSON.parse(rawOutput);
     } catch (err) {
@@ -73,7 +87,24 @@ Instructions:
       });
     }
 
-    res.json({ result: parsedResult });
+    // ===== Backend Validation Layer =====
+    const validatedResult = {};
+
+    Object.keys(parsedResult).forEach(category => {
+      const categoryData = lcfContext.find(
+        c => c.category === category
+      );
+
+      if (!categoryData) return;
+
+      if (categoryData.options.includes(parsedResult[category])) {
+        validatedResult[category] = parsedResult[category];
+      } else {
+        validatedResult[category] = null;
+      }
+    });
+
+    res.json({ result: validatedResult });
 
   } catch (error) {
     console.error("Error:", error.response?.data || error.message);
@@ -82,12 +113,8 @@ Instructions:
 });
 
 // ===== Start server =====
-// app.listen(4000, () =>
-//   console.log("Cloud Llama3 server running on port 4000")
-// );
 const PORT = process.env.PORT || 4000;
 
 app.listen(PORT, () =>
   console.log(`Server running on port ${PORT}`)
 );
-
